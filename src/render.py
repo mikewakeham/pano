@@ -2,7 +2,19 @@ import torch
 import numpy as np
 import cv2
 from typing import Optional, Tuple
+from scipy.spatial.transform import Rotation as R, Slerp
+from gsplat.rendering import rasterization
+from tqdm import tqdm
+import py360convert
 
+CUBE_FACE_DIRS = [
+    ("front", np.array([0, 0, -1], np.float32), np.array([0, 1, 0], np.float32)),
+    ("right", np.array([1, 0, 0], np.float32),  np.array([0, 1, 0], np.float32)),
+    ("back",  np.array([0, 0, 1], np.float32),  np.array([0, 1, 0], np.float32)),
+    ("left",  np.array([-1, 0, 0], np.float32), np.array([0, 1, 0], np.float32)),
+    ("up",    np.array([0, -1, 0], np.float32),  np.array([0, 0, -1], np.float32)),
+    ("down",  np.array([0, 1, 0], np.float32), np.array([0, 0, 1], np.float32)),
+]
 
 def render_equirectangular_torch(
     points: np.ndarray,
@@ -250,3 +262,140 @@ def hunyuanworld_to_pointcloud(
     
     return points, colors
 
+def face_w2c_relative(face_forward, face_up):
+    f = face_forward / np.linalg.norm(face_forward)
+    u = face_up / np.linalg.norm(face_up)
+    r = np.cross(u, f); r /= np.linalg.norm(r)
+    u = np.cross(f, r); u /= np.linalg.norm(u)
+    R_standard = np.stack([r, u, f], axis=1)
+
+    R_flip = np.array([[-1,0,0],[0,1,0],[0,0,-1]], np.float32)
+    R_face = R_standard @ R_flip
+
+    w2c = np.eye(4, dtype=np.float32)
+    w2c[:3, :3] = R_face
+    return w2c
+
+def interpolate_w2c_poses(w2c_poses, num_frames):
+    """
+    Arc-length parameterized interpolation:
+    - rotations: Slerp along arc-length time
+    - translations: linear interpolation along arc-length time
+    """
+    w2c_poses = np.asarray(w2c_poses, dtype=np.float32)
+    if len(w2c_poses) == num_frames:
+        return w2c_poses
+
+    positions = w2c_poses[:, :3, 3]
+    dists = np.zeros(len(positions), dtype=np.float32)
+    for i in range(1, len(positions)):
+        dists[i] = dists[i-1] + np.linalg.norm(positions[i] - positions[i-1])
+
+    if dists[-1] > 0:
+        t_orig = dists / dists[-1]
+    else:
+        t_orig = np.linspace(0, 1, len(positions), dtype=np.float32)
+
+    t_new = np.linspace(0, 1, num_frames, dtype=np.float32)
+
+    rots = R.from_matrix(w2c_poses[:, :3, :3])
+    slerp = Slerp(t_orig, rots)
+    R_interp = slerp(t_new).as_matrix()
+
+    trans = np.vstack([
+        np.interp(t_new, t_orig, positions[:, 0]),
+        np.interp(t_new, t_orig, positions[:, 1]),
+        np.interp(t_new, t_orig, positions[:, 2]),
+    ]).T
+
+    out = np.repeat(np.eye(4, dtype=np.float32)[None], num_frames, axis=0)
+    out[:, :3, :3] = R_interp
+    out[:, :3, 3] = trans
+    return out
+
+def render_cubemap(
+    splats: dict,
+    w2c_poses: np.ndarray,
+    num_frames: int,
+    face_resolution: int = 512,
+    device: str = None,
+):
+    if device is None:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = torch.device(device)
+
+    means = splats["means"].to(device)
+    quats = splats["quats"].to(device)
+    scales = torch.exp(splats["scales"].to(device))
+    opacities = torch.sigmoid(splats["opacities"].to(device))
+    colors = torch.cat([splats["sh0"].to(device), splats["shN"].to(device)], dim=1)
+    sh_degree = int(np.sqrt(colors.shape[1]) - 1)
+
+    w2c_interp = interpolate_w2c_poses(w2c_poses, num_frames)
+    w2c_interp = torch.tensor(w2c_interp, dtype=torch.float32, device=device)
+
+    K = torch.eye(3, device=device, dtype=torch.float32)
+    K[0, 0] = K[1, 1] = face_resolution / 2.0
+    K[0, 2] = K[1, 2] = face_resolution / 2.0
+    K = K.unsqueeze(0)
+
+    frames = []
+    for i in tqdm(range(num_frames)):
+        cam_w2c = w2c_interp[i].unsqueeze(0)
+        face_imgs = []
+        for _, fwd, up in CUBE_FACE_DIRS:
+            face_w2c = face_w2c_relative(fwd, up)
+            face_w2c = torch.tensor(face_w2c, dtype=torch.float32, device=device).unsqueeze(0)
+
+            R_cam, t_cam = cam_w2c[:, :3, :3], cam_w2c[:, :3, 3]
+            R_face = face_w2c[:, :3, :3]
+
+            combined = cam_w2c.clone()
+            combined[:, :3, :3] = torch.bmm(R_face, R_cam)
+            combined[:, :3, 3] = torch.bmm(R_face, t_cam.unsqueeze(-1)).squeeze(-1)
+
+            with torch.no_grad():
+                rgb, _, _ = rasterization(
+                    means=means,
+                    quats=quats,
+                    scales=scales,
+                    opacities=opacities,
+                    colors=colors,
+                    viewmats=combined,
+                    Ks=K,
+                    width=face_resolution,
+                    height=face_resolution,
+                    sh_degree=sh_degree,
+                    packed=True,
+                )
+            img = (rgb[0].cpu().numpy().clip(0,1) * 255).astype(np.uint8)
+
+            if _ in ("up", "down"):
+                img = np.flip(img, axis=0)
+                img = np.flip(img, axis=1)
+
+            face_imgs.append(img)
+
+        frames.append(np.stack(face_imgs, axis=0))  # [6,H,W,3] as [front, right, back, left, up, down]
+
+    return np.stack(frames, axis=0)  # [N,6,H,W,3]
+
+def cubemap_frames_to_equirectangular(
+    cubemap_frames: np.ndarray,
+    equi_height: int = None,
+    equi_width: int = None,
+):
+    if cubemap_frames.ndim != 5 or cubemap_frames.shape[1] != 6:
+        raise ValueError("cubemap_frames must be [N, 6, H, W, 3]")
+
+    N, _, H, W, _ = cubemap_frames.shape
+    eq_h = equi_height or H
+    eq_w = equi_width or (H * 2)
+
+    equi_frames = []
+    for i in range(N):
+        faces = [cubemap_frames[i, f] for f in range(6)]
+        equi = py360convert.c2e(faces, eq_h, eq_w, cube_format="list")
+        equi_frames.append(equi.astype(np.uint8))
+
+    return np.stack(equi_frames, axis=0)
