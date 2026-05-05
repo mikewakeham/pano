@@ -7,3 +7,6 @@
 [submodule "third_party/HunyuanWorld-Mirror"]
 	path = third_party/HunyuanWorld-Mirror
 	url = https://github.com/Tencent-Hunyuan/HunyuanWorld-Mirror
+[submodule "third_party/moge"]
+	path = third_party/moge
+	url = https://github.com/microsoft/MoGe.git

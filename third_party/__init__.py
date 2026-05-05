@@ -80,5 +80,13 @@ _dap_root = _module_dir / "DAP"
 if str(_dap_root) not in sys.path:
     sys.path.insert(0, str(_dap_root))
 
-__all__ = ["WorldMirror", "extract_load_and_preprocess_images", "_dap_root"]
+_moge_root = _module_dir / "moge"
+if str(_moge_root) not in sys.path:
+    sys.path.insert(0, str(_moge_root))
+
+_wan21_root = _module_dir / "Wan2.1"
+if str(_wan21_root) not in sys.path:
+    sys.path.insert(0, str(_wan21_root))
+
+__all__ = ["WorldMirror", "extract_load_and_preprocess_images", "_dap_root", "_moge_root", "_wan21_root"]
 

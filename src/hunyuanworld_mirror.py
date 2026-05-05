@@ -17,10 +17,9 @@ class HunyuanWorldMirror:
         self.fps = fps
         self.target_size = target_size
         
-        print(f"loading model {model_name}...")
+        print("loading hunyuanworld-mirror...")
         self.model = WorldMirror.from_pretrained(model_name).to(self.device)
         self.model.eval()
-        print("HunyuanWorld loaded")
     
     def __call__(
         self,
