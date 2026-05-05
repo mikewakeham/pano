@@ -10,3 +10,6 @@
 [submodule "third_party/moge"]
 	path = third_party/moge
 	url = https://github.com/microsoft/MoGe.git
+[submodule "third_party/Wan2.1"]
+	path = third_party/Wan2.1
+	url = https://github.com/Wan-Video/Wan2.1.git
