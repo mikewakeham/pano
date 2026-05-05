@@ -1,4 +1,4 @@
-# Panoramic Generation for Perspective Videos with Camera Motion
+# Panoramic Generation from Perspective Videos with Camera Motion
 
 **[[ Short Paper PDF ]](assets/CS_599_Final_Report.pdf)**
 
